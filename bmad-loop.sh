@@ -490,7 +490,7 @@ run_workflow() {
   # Run claude and stream output to both terminal and log
   # timeout sends SIGTERM after WORKFLOW_TIMEOUT_MINS; exit code 124 = timed out
   local exit_code=0
-  printf '%s\n' "$prompt" | timeout "${WORKFLOW_TIMEOUT_MINS}m" claude -p --dangerously-skip-permissions --model claude-opus-4-6 2>&1 | tee "$run_log" || exit_code=$?
+  printf '%s\n' "$prompt" | timeout "${WORKFLOW_TIMEOUT_MINS}m" claude -p --dangerously-skip-permissions --permission-mode bypassPermissions --model claude-opus-4-6 2>&1 | tee "$run_log" || exit_code=$?
 
   # claude -p exits 0 even on some errors; check for explicit failure
   if [ $exit_code -ne 0 ]; then
