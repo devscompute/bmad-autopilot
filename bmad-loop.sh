@@ -30,7 +30,7 @@ BMM_CONFIG="$PROJECT_ROOT/_bmad/bmm/config.yaml"
 DRY_RUN=false
 MAX_LOOPS=100
 USE_COLOR=true
-WORKFLOW_TIMEOUT_MINS=30
+WORKFLOW_TIMEOUT_MINS=90
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -462,6 +462,28 @@ build_prompt() {
 }
 
 # ---------------------------------------------------------------------------
+# macOS-compatible timeout (Perl, available by default on macOS)
+# Usage: macos_timeout <seconds> cmd [args...]
+# Exits 124 on timeout, otherwise forwards the command's exit code.
+# ---------------------------------------------------------------------------
+macos_timeout() {
+  local secs=$1; shift
+  perl -e '
+    my ($secs, @cmd) = @ARGV;
+    my $pid = fork // die "fork failed: $!";
+    if ($pid == 0) { exec @cmd; die "exec failed: $!"; }
+    local $SIG{ALRM} = sub {
+      kill "TERM", $pid; sleep 3; kill "KILL", $pid; exit 124;
+    };
+    alarm $secs;
+    waitpid $pid, 0;
+    alarm 0;
+    exit 124 if $? == -1;
+    exit($? >> 8);
+  ' -- "$secs" "$@"
+}
+
+# ---------------------------------------------------------------------------
 # Execute a workflow via claude -p
 # ---------------------------------------------------------------------------
 run_workflow() {
@@ -490,7 +512,7 @@ run_workflow() {
   # Run claude and stream output to both terminal and log
   # timeout sends SIGTERM after WORKFLOW_TIMEOUT_MINS; exit code 124 = timed out
   local exit_code=0
-  printf '%s\n' "$prompt" | timeout "${WORKFLOW_TIMEOUT_MINS}m" claude -p --dangerously-skip-permissions --permission-mode bypassPermissions --model claude-opus-4-6 2>&1 | tee "$run_log" || exit_code=$?
+  printf '%s\n' "$prompt" | macos_timeout $((WORKFLOW_TIMEOUT_MINS * 60)) claude -p --dangerously-skip-permissions --permission-mode bypassPermissions --model claude-opus-4-6 2>&1 | tee "$run_log" || exit_code=$?
 
   # claude -p exits 0 even on some errors; check for explicit failure
   if [ $exit_code -ne 0 ]; then
