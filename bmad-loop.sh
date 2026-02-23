@@ -163,6 +163,7 @@ LAST_COMPLETED_EPIC=""
 LOOP_COUNT=0
 INTERRUPTED=false
 CONTROL_ACTION=""
+WORKFLOW_TIMED_OUT=false
 
 # ---------------------------------------------------------------------------
 # Signal handling
@@ -496,14 +497,17 @@ run_workflow() {
     local ts_end
     ts_end="$(date +%s)"
     if [ $exit_code -eq 124 ]; then
+      WORKFLOW_TIMED_OUT=true
       log ERROR "claude timed out after ${WORKFLOW_TIMEOUT_MINS}m (exit 124)"
       log WARN "The workflow may have done real work before hanging — check sprint-status.yaml before retrying"
     else
+      WORKFLOW_TIMED_OUT=false
       log ERROR "claude exited with code $exit_code after $((ts_end - ts_start))s"
     fi
     log ERROR "Log saved to: $run_log"
     return $exit_code
   fi
+  WORKFLOW_TIMED_OUT=false
 
   local ts_end
   ts_end="$(date +%s)"
@@ -750,15 +754,25 @@ main() {
         exit 2
       fi
 
-      if ask_yes_no "Workflow failed. Retry this story?"; then
+      # If the workflow timed out but already advanced the story status,
+      # auto-skip without prompting — the real work was done.
+      local current_story_status
+      current_story_status="$(yaml_get_key "$story_key")"
+      local status_was_advanced=false
+      if [ -n "$current_story_status" ] && [ "$current_story_status" != "$story_status" ]; then
+        status_was_advanced=true
+      fi
+
+      if $WORKFLOW_TIMED_OUT && $status_was_advanced; then
+        log WARN "Timeout: story $story_key was already advanced to '$current_story_status' — auto-skipping, preserving status."
+        CONSECUTIVE_FAILURES=0
+      elif ask_yes_no "Workflow failed. Retry this story?"; then
         log INFO "Retrying..."
         continue
       else
-        # Check if the workflow advanced the story status before failing/timing out.
+        # Check if the workflow advanced the story status before failing.
         # If so, preserve it — don't blindly reset work that was already done.
-        local current_story_status
-        current_story_status="$(yaml_get_key "$story_key")"
-        if [ -n "$current_story_status" ] && [ "$current_story_status" != "$story_status" ]; then
+        if $status_was_advanced; then
           log WARN "Story $story_key was advanced to '$current_story_status' during the workflow — preserving status (not resetting to backlog)."
         else
           log WARN "Skipping failed story: $story_key (resetting to backlog)"
