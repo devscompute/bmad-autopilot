@@ -703,13 +703,19 @@ main() {
         log EPIC "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         log EPIC "Epic $epic_num_done fully wrapped up. Pausing for review."
         log EPIC "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        # Write sentinel file for Devs (OpenClaw) to pick up and notify Mr. T
-        echo "Epic $epic_num_done complete — autopilot paused for your review before the next epic starts." \
-          > "$SCRIPT_DIR/epic-review-pending"
-        # Pause the loop
-        echo "pause" > "$CONTROL_FILE"
-        log WARN "⏸  Autopilot paused. Devs will ping you on Telegram."
-        log WARN "    To resume: tell Devs, or delete $CONTROL_FILE"
+        if [ "$epic_num_done" -ge 2 ]; then
+          # Epic 2+ — pause and request human review
+          echo "Epic $epic_num_done complete — autopilot paused for your review. Reply to resume." \
+            > "$SCRIPT_DIR/epic-review-pending"
+          echo "pause" > "$CONTROL_FILE"
+          log WARN "⏸  Autopilot paused after Epic $epic_num_done. Devs will ping you on Telegram."
+          log WARN "    To resume: tell Devs, or delete $CONTROL_FILE"
+        else
+          # Epic 1 — notify but continue automatically
+          echo "Epic $epic_num_done complete — continuing automatically to Epic $((epic_num_done + 1))." \
+            > "$SCRIPT_DIR/epic-review-pending"
+          log INFO "📬 Epic $epic_num_done done — notifying Devs, continuing to Epic $((epic_num_done + 1))."
+        fi
       fi
 
       continue
