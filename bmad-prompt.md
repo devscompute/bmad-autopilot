@@ -57,7 +57,7 @@ You are implementing story `{{STORY_KEY}}`.
    - Implement minimum code to pass (green)
    - Refactor while keeping tests green
 4. Complete **ALL tasks** in the story — do not stop at the first milestone
-5. Run all tests after implementation — fix any failures before marking done
+5. Write all required tests — but **do NOT execute builds or test runs** (see CLAUDE.md — headless environment, no Xcode/simulator available). Note skipped execution in your report.
 6. When fully done, update `{{SPRINT_STATUS_PATH}}`:
    - Change `{{STORY_KEY}}: {{STORY_STATUS}}` → `{{STORY_KEY}}: done`
    - If the story was the last in its epic, update the epic status accordingly
@@ -68,12 +68,12 @@ You are reviewing story `{{STORY_KEY}}`.
 
 1. Find the story file and read the acceptance criteria
 2. Review all code changes related to this story:
-   - Run linting, type checks, and tests
-   - Check test coverage for new code
-   - Verify all acceptance criteria are met
+   - **Do NOT run linting, type checks, or tests** (see CLAUDE.md — headless environment, no Xcode/simulator available)
+   - Check test coverage for new code by reading the test files
+   - Verify all acceptance criteria are met by reading the implementation
    - Check for security issues, code quality, and consistency with existing patterns
 3. **When issues are found: auto-select "fix automatically"** — do not just report issues, fix them
-4. After fixing all issues, re-run tests to confirm green
+4. After fixing all issues, verify correctness by reading the code (do not re-run tests)
 5. When review passes, update `{{SPRINT_STATUS_PATH}}`:
    - Change `{{STORY_KEY}}: review` → `{{STORY_KEY}}: done`
 
