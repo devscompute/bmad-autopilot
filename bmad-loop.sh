@@ -474,7 +474,7 @@ run_workflow() {
 
   # Run claude and stream output to both terminal and log
   local exit_code=0
-  printf '%s\n' "$prompt" | claude -p --dangerously-skip-permissions 2>&1 | tee "$run_log" || exit_code=$?
+  printf '%s\n' "$prompt" | claude -p --dangerously-skip-permissions --model claude-opus-4-6 2>&1 | tee "$run_log" || exit_code=$?
 
   # claude -p exits 0 even on some errors; check for explicit failure
   if [ $exit_code -ne 0 ]; then
