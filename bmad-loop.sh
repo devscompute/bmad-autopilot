@@ -30,6 +30,7 @@ BMM_CONFIG="$PROJECT_ROOT/_bmad/bmm/config.yaml"
 DRY_RUN=false
 MAX_LOOPS=100
 USE_COLOR=true
+WORKFLOW_TIMEOUT_MINS=30
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -43,12 +44,25 @@ while [[ $# -gt 0 ]]; do
       fi
       ;;
     --max-loops=*) MAX_LOOPS="${1#*=}" ;;
+    --timeout-mins)
+      if [[ -n "${2:-}" ]]; then
+        WORKFLOW_TIMEOUT_MINS="$2"; shift
+      else
+        echo "Error: --timeout-mins requires a value" >&2; exit 1
+      fi
+      ;;
+    --timeout-mins=*) WORKFLOW_TIMEOUT_MINS="${1#*=}" ;;
   esac
   shift
 done
 
 if ! [[ "$MAX_LOOPS" =~ ^[0-9]+$ ]] || [[ "$MAX_LOOPS" -eq 0 ]]; then
   echo "Error: --max-loops must be a positive integer (got: '$MAX_LOOPS')" >&2
+  exit 1
+fi
+
+if ! [[ "$WORKFLOW_TIMEOUT_MINS" =~ ^[0-9]+$ ]] || [[ "$WORKFLOW_TIMEOUT_MINS" -eq 0 ]]; then
+  echo "Error: --timeout-mins must be a positive integer (got: '$WORKFLOW_TIMEOUT_MINS')" >&2
   exit 1
 fi
 
@@ -473,14 +487,20 @@ run_workflow() {
   fi
 
   # Run claude and stream output to both terminal and log
+  # timeout sends SIGTERM after WORKFLOW_TIMEOUT_MINS; exit code 124 = timed out
   local exit_code=0
-  printf '%s\n' "$prompt" | claude -p --dangerously-skip-permissions --model claude-opus-4-6 2>&1 | tee "$run_log" || exit_code=$?
+  printf '%s\n' "$prompt" | timeout "${WORKFLOW_TIMEOUT_MINS}m" claude -p --dangerously-skip-permissions --model claude-opus-4-6 2>&1 | tee "$run_log" || exit_code=$?
 
   # claude -p exits 0 even on some errors; check for explicit failure
   if [ $exit_code -ne 0 ]; then
     local ts_end
     ts_end="$(date +%s)"
-    log ERROR "claude exited with code $exit_code after $((ts_end - ts_start))s"
+    if [ $exit_code -eq 124 ]; then
+      log ERROR "claude timed out after ${WORKFLOW_TIMEOUT_MINS}m (exit 124)"
+      log WARN "The workflow may have done real work before hanging — check sprint-status.yaml before retrying"
+    else
+      log ERROR "claude exited with code $exit_code after $((ts_end - ts_start))s"
+    fi
     log ERROR "Log saved to: $run_log"
     return $exit_code
   fi
@@ -734,8 +754,16 @@ main() {
         log INFO "Retrying..."
         continue
       else
-        log WARN "Skipping failed story: $story_key"
-        update_story_status "$story_key" "backlog"
+        # Check if the workflow advanced the story status before failing/timing out.
+        # If so, preserve it — don't blindly reset work that was already done.
+        local current_story_status
+        current_story_status="$(yaml_get_key "$story_key")"
+        if [ -n "$current_story_status" ] && [ "$current_story_status" != "$story_status" ]; then
+          log WARN "Story $story_key was advanced to '$current_story_status' during the workflow — preserving status (not resetting to backlog)."
+        else
+          log WARN "Skipping failed story: $story_key (resetting to backlog)"
+          update_story_status "$story_key" "backlog"
+        fi
         CONSECUTIVE_FAILURES=0
       fi
     fi
