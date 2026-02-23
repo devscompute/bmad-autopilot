@@ -31,13 +31,26 @@ DRY_RUN=false
 MAX_LOOPS=100
 USE_COLOR=true
 
-for arg in "$@"; do
-  case "$arg" in
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     --dry-run)   DRY_RUN=true ;;
     --no-color)  USE_COLOR=false ;;
-    --max-loops=*) MAX_LOOPS="${arg#*=}" ;;
+    --max-loops)
+      if [[ -n "${2:-}" ]]; then
+        MAX_LOOPS="$2"; shift
+      else
+        echo "Error: --max-loops requires a value" >&2; exit 1
+      fi
+      ;;
+    --max-loops=*) MAX_LOOPS="${1#*=}" ;;
   esac
+  shift
 done
+
+if ! [[ "$MAX_LOOPS" =~ ^[0-9]+$ ]] || [[ "$MAX_LOOPS" -eq 0 ]]; then
+  echo "Error: --max-loops must be a positive integer (got: '$MAX_LOOPS')" >&2
+  exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Colors
@@ -135,6 +148,7 @@ MAX_FAILURES=3
 LAST_COMPLETED_EPIC=""
 LOOP_COUNT=0
 INTERRUPTED=false
+CONTROL_ACTION=""
 
 # ---------------------------------------------------------------------------
 # Signal handling
@@ -150,9 +164,10 @@ trap cleanup SIGINT SIGTERM
 # Control file helpers
 # ---------------------------------------------------------------------------
 check_control() {
+  CONTROL_ACTION=""
   [ -f "$CONTROL_FILE" ] || return 0
   local cmd
-  cmd="$(cat "$CONTROL_FILE" | tr '[:upper:]' '[:lower:]' | xargs)"
+  cmd="$(tr '[:upper:]' '[:lower:]' < "$CONTROL_FILE" | xargs)"
 
   case "$cmd" in
     pause)
@@ -166,7 +181,7 @@ check_control() {
     skip)
       log WARN "Control: SKIP requested. Current story will be set to backlog."
       rm -f "$CONTROL_FILE"
-      echo "SKIP"  # caller reads this
+      CONTROL_ACTION="SKIP"
       ;;
     status)
       rm -f "$CONTROL_FILE"
@@ -428,7 +443,7 @@ build_prompt() {
   template="${template//\{\{WORKFLOW_ENGINE_PATH\}\}/$WORKFLOW_ENGINE}"
   template="${template//\{\{BMM_CONFIG_PATH\}\}/$BMM_CONFIG}"
 
-  echo "$template"
+  printf '%s\n' "$template"
 }
 
 # ---------------------------------------------------------------------------
@@ -459,7 +474,7 @@ run_workflow() {
 
   # Run claude and stream output to both terminal and log
   local exit_code=0
-  echo "$prompt" | claude -p --dangerously-skip-permissions 2>&1 | tee "$run_log" || exit_code=$?
+  printf '%s\n' "$prompt" | claude -p --dangerously-skip-permissions 2>&1 | tee "$run_log" || exit_code=$?
 
   # claude -p exits 0 even on some errors; check for explicit failure
   if [ $exit_code -ne 0 ]; then
@@ -576,14 +591,7 @@ main() {
     fi
 
     # ── Check control file ──────────────────────────────────────────────
-    if [ -f "$CONTROL_FILE" ]; then
-      local ctrl_result
-      ctrl_result="$(check_control)"
-      if [ "$ctrl_result" = "SKIP" ]; then
-        log WARN "SKIP command acknowledged — will mark current story as backlog."
-        # We'll handle this below when we know the story key
-      fi
-    fi
+    check_control
 
     # ── Determine next action ───────────────────────────────────────────
     local action_str
@@ -662,10 +670,10 @@ main() {
     fi
 
     # ── Check if skip was requested ────────────────────────────────────
-    if [ -f "$CONTROL_FILE" ] && grep -qi "^skip" "$CONTROL_FILE" 2>/dev/null; then
+    if [ "$CONTROL_ACTION" = "SKIP" ]; then
       log WARN "Skipping story: $story_key"
       update_story_status "$story_key" "backlog"
-      rm -f "$CONTROL_FILE"
+      CONTROL_ACTION=""
       continue
     fi
 
