@@ -459,7 +459,7 @@ run_workflow() {
 
   # Run claude and stream output to both terminal and log
   local exit_code=0
-  echo "$prompt" | claude -p --no-show-hidden-context 2>&1 | tee "$run_log" || exit_code=$?
+  echo "$prompt" | claude -p --dangerously-skip-permissions 2>&1 | tee "$run_log" || exit_code=$?
 
   # claude -p exits 0 even on some errors; check for explicit failure
   if [ $exit_code -ne 0 ]; then
@@ -617,6 +617,7 @@ main() {
       echo ""
       log EPIC "All stories done! A retrospective is available: ${C_BOLD}$story_key${C_RESET}"
       echo ""
+      local retro_done=false
       if ask_yes_no "Run retrospective for $story_key now?"; then
         workflow_name="retrospective"
         story_status="optional"
@@ -626,6 +627,7 @@ main() {
         if $run_ok; then
           CONSECUTIVE_FAILURES=0
           update_story_status "$story_key" "done"
+          retro_done=true
         else
           CONSECUTIVE_FAILURES=$((CONSECUTIVE_FAILURES + 1))
           log ERROR "Retrospective failed (failure $CONSECUTIVE_FAILURES/$MAX_FAILURES)"
@@ -637,7 +639,25 @@ main() {
       else
         log INFO "Skipping retrospective $story_key — marking as done."
         update_story_status "$story_key" "done"
+        retro_done=true
       fi
+
+      # ── Notify + pause for human review before next epic ───────────────
+      if $retro_done; then
+        local epic_num_done
+        epic_num_done="$(echo "$story_key" | grep -oE '[0-9]+')"
+        log EPIC "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log EPIC "Epic $epic_num_done fully wrapped up. Pausing for review."
+        log EPIC "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        # Write sentinel file for Devs (OpenClaw) to pick up and notify Mr. T
+        echo "Epic $epic_num_done complete — autopilot paused for your review before the next epic starts." \
+          > "$SCRIPT_DIR/epic-review-pending"
+        # Pause the loop
+        echo "pause" > "$CONTROL_FILE"
+        log WARN "⏸  Autopilot paused. Devs will ping you on Telegram."
+        log WARN "    To resume: tell Devs, or delete $CONTROL_FILE"
+      fi
+
       continue
     fi
 
