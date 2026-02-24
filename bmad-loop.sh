@@ -736,9 +736,19 @@ main() {
         echo ""
         local retro_key="epic-${LAST_COMPLETED_EPIC}-retrospective"
         log INFO "Running retrospective for Epic $LAST_COMPLETED_EPIC autonomously..."
+        local retro_ok=true
         run_workflow "retrospective" "$retro_key" "optional" && \
           update_story_status "$retro_key" "done" || \
-          log WARN "Retrospective failed — continuing anyway"
+          { log WARN "Retrospective failed — continuing anyway"; retro_ok=false; }
+
+        # Pause after every completed epic (Epic 2+)
+        if [ "$LAST_COMPLETED_EPIC" -ge 2 ]; then
+          echo "Epic $LAST_COMPLETED_EPIC complete — autopilot paused for your review. Reply to resume." \
+            > "$SCRIPT_DIR/epic-review-pending"
+          echo "pause" > "$CONTROL_FILE"
+          log WARN "⏸  Autopilot paused after Epic $LAST_COMPLETED_EPIC. Devs will ping you on Telegram."
+          log WARN "    To resume: tell Devs, or delete $CONTROL_FILE"
+        fi
       fi
     fi
 
