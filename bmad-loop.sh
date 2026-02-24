@@ -748,6 +748,9 @@ main() {
           echo "pause" > "$CONTROL_FILE"
           log WARN "⏸  Autopilot paused after Epic $LAST_COMPLETED_EPIC. Devs will ping you on Telegram."
           log WARN "    To resume: tell Devs, or delete $CONTROL_FILE"
+          # continue so check_control at the top of the next iteration picks up the pause
+          # before any story from the new epic is started
+          continue
         fi
       fi
     fi
