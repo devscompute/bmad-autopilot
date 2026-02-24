@@ -672,28 +672,22 @@ main() {
       log EPIC "All stories done! A retrospective is available: ${C_BOLD}$story_key${C_RESET}"
       echo ""
       local retro_done=false
-      if ask_yes_no "Run retrospective for $story_key now?"; then
-        workflow_name="retrospective"
-        story_status="optional"
-        local run_ok=true
-        run_workflow "$workflow_name" "$story_key" "$story_status" || run_ok=false
+      workflow_name="retrospective"
+      story_status="optional"
+      local run_ok=true
+      run_workflow "$workflow_name" "$story_key" "$story_status" || run_ok=false
 
-        if $run_ok; then
-          CONSECUTIVE_FAILURES=0
-          update_story_status "$story_key" "done"
-          retro_done=true
-        else
-          CONSECUTIVE_FAILURES=$((CONSECUTIVE_FAILURES + 1))
-          log ERROR "Retrospective failed (failure $CONSECUTIVE_FAILURES/$MAX_FAILURES)"
-          if [ $CONSECUTIVE_FAILURES -ge $MAX_FAILURES ]; then
-            log HALT "Too many consecutive failures. Halting."
-            exit 2
-          fi
-        fi
-      else
-        log INFO "Skipping retrospective $story_key — marking as done."
+      if $run_ok; then
+        CONSECUTIVE_FAILURES=0
         update_story_status "$story_key" "done"
         retro_done=true
+      else
+        CONSECUTIVE_FAILURES=$((CONSECUTIVE_FAILURES + 1))
+        log ERROR "Retrospective failed (failure $CONSECUTIVE_FAILURES/$MAX_FAILURES)"
+        if [ $CONSECUTIVE_FAILURES -ge $MAX_FAILURES ]; then
+          log HALT "Too many consecutive failures. Halting."
+          exit 2
+        fi
       fi
 
       # ── Notify + pause for human review before next epic ───────────────
@@ -740,12 +734,11 @@ main() {
         log EPIC "Epic $LAST_COMPLETED_EPIC complete! Moving to Epic $next_epic"
         log EPIC "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo ""
-        if ask_yes_no "Run retrospective for Epic $LAST_COMPLETED_EPIC before continuing?"; then
-          local retro_key="epic-${LAST_COMPLETED_EPIC}-retrospective"
-          run_workflow "retrospective" "$retro_key" "optional" && \
-            update_story_status "$retro_key" "done" || \
-            log WARN "Retrospective failed — continuing anyway"
-        fi
+        local retro_key="epic-${LAST_COMPLETED_EPIC}-retrospective"
+        log INFO "Running retrospective for Epic $LAST_COMPLETED_EPIC autonomously..."
+        run_workflow "retrospective" "$retro_key" "optional" && \
+          update_story_status "$retro_key" "done" || \
+          log WARN "Retrospective failed — continuing anyway"
       fi
     fi
 
