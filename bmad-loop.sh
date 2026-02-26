@@ -31,11 +31,13 @@ DRY_RUN=false
 MAX_LOOPS=100
 USE_COLOR=true
 WORKFLOW_TIMEOUT_MINS=90
+CORRECTION_MODE=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --dry-run)   DRY_RUN=true ;;
-    --no-color)  USE_COLOR=false ;;
+    --dry-run)        DRY_RUN=true ;;
+    --no-color)       USE_COLOR=false ;;
+    --correction-mode) CORRECTION_MODE=true ;;
     --max-loops)
       if [[ -n "${2:-}" ]]; then
         MAX_LOOPS="$2"; shift
@@ -273,6 +275,33 @@ epic_num_from_epic_key() {
 }
 
 # ---------------------------------------------------------------------------
+# Auto-detect correction mode
+# If done stories exist in higher-numbered epics than any pending (non-done)
+# story, this is a corrected-course project, not greenfield development.
+# In greenfield flow, stories are processed strictly in order — later epics
+# never have done stories while earlier epics still have pending work.
+# ---------------------------------------------------------------------------
+auto_detect_correction_mode() {
+  local entries highest_done_epic=0 lowest_pending_epic=99999
+  entries="$(yaml_get_all_status)"
+
+  while IFS='=' read -r key val; do
+    [ -z "$key" ] && continue
+    is_story_key "$key" || continue
+    local epic
+    epic="$(epic_num_from_story "$key")"
+    if [ "$val" = "done" ]; then
+      [ "$epic" -gt "$highest_done_epic" ] && highest_done_epic="$epic"
+    else
+      [ "$epic" -lt "$lowest_pending_epic" ] && lowest_pending_epic="$epic"
+    fi
+  done <<< "$entries"
+
+  # Correction mode: done stories exist in later epics than pending stories
+  [ "$highest_done_epic" -gt "$lowest_pending_epic" ]
+}
+
+# ---------------------------------------------------------------------------
 # Determine next action from sprint-status.yaml
 # Returns: "WORKFLOW|KEY|STATUS" or "DONE" or "RETRO|key" or "NONE"
 # ---------------------------------------------------------------------------
@@ -298,6 +327,9 @@ determine_next_action() {
   while IFS='=' read -r key val; do
     [ -z "$key" ] && continue
     if is_story_key "$key"; then
+      # Safety guard: NEVER queue a story that is already done.
+      # This protects correction-mode runs where done stories coexist with new backlog stories.
+      [ "$val" = "done" ] && continue
       story_keys+=("$key")
       story_vals+=("$val")
     fi
@@ -620,6 +652,18 @@ main() {
   fi
 
   log INFO "YAML parser: $(if $HAS_YQ; then echo "yq"; else echo "grep/awk fallback"; fi)"
+
+  # Auto-detect correction mode if not explicitly set via --correction-mode
+  if ! $CORRECTION_MODE; then
+    if auto_detect_correction_mode; then
+      CORRECTION_MODE=true
+      log WARN "Auto-detected CORRECTION MODE: Done stories found in later epics than pending work."
+      log WARN "This looks like a corrected-course project. Epic pauses will be disabled."
+    fi
+  fi
+  if $CORRECTION_MODE; then
+    log WARN "CORRECTION MODE active: Epic pauses disabled. Done stories will never be touched."
+  fi
   echo ""
 
   # ── Main loop ────────────────────────────────────────────────────────────
@@ -695,20 +739,20 @@ main() {
         local epic_num_done
         epic_num_done="$(echo "$story_key" | grep -oE '[0-9]+')"
         log EPIC "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        log EPIC "Epic $epic_num_done fully wrapped up. Pausing for review."
+        log EPIC "Epic $epic_num_done fully wrapped up."
         log EPIC "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        if [ "$epic_num_done" -ge 2 ]; then
-          # Epic 2+ — pause and request human review
+        if [ "$epic_num_done" -ge 2 ] && ! $CORRECTION_MODE; then
+          # Epic 2+ — pause and request human review (normal mode only)
           echo "Epic $epic_num_done complete — autopilot paused for your review. Reply to resume." \
             > "$SCRIPT_DIR/epic-review-pending"
           echo "pause" > "$CONTROL_FILE"
           log WARN "⏸  Autopilot paused after Epic $epic_num_done. Devs will ping you on Telegram."
           log WARN "    To resume: tell Devs, or delete $CONTROL_FILE"
         else
-          # Epic 1 — notify but continue automatically
-          echo "Epic $epic_num_done complete — continuing automatically to Epic $((epic_num_done + 1))." \
+          # Epic 1, or any epic in correction mode — notify and continue automatically
+          echo "Epic $epic_num_done complete — continuing automatically." \
             > "$SCRIPT_DIR/epic-review-pending"
-          log INFO "📬 Epic $epic_num_done done — notifying Devs, continuing to Epic $((epic_num_done + 1))."
+          log INFO "📬 Epic $epic_num_done done — continuing to next work item."
         fi
       fi
 
@@ -741,8 +785,8 @@ main() {
           update_story_status "$retro_key" "done" || \
           { log WARN "Retrospective failed — continuing anyway"; retro_ok=false; }
 
-        # Pause after every completed epic (Epic 2+)
-        if [ "$LAST_COMPLETED_EPIC" -ge 2 ]; then
+        # Pause after every completed epic (Epic 2+) — skipped in correction mode
+        if [ "$LAST_COMPLETED_EPIC" -ge 2 ] && ! $CORRECTION_MODE; then
           echo "Epic $LAST_COMPLETED_EPIC complete — autopilot paused for your review. Reply to resume." \
             > "$SCRIPT_DIR/epic-review-pending"
           echo "pause" > "$CONTROL_FILE"
