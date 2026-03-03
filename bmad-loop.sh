@@ -32,7 +32,7 @@ MAX_LOOPS=100
 MAX_EPICS=0   # 0 = unlimited; N = pause after N completed epics
 QUALITY_PASS=false  # --quality-pass: run quick-spec+quick-dev fix pass after each epic retro
 USE_COLOR=true
-WORKFLOW_TIMEOUT_MINS=90
+WORKFLOW_TIMEOUT_MINS=0  # 0 = no timeout; N = kill workflow after N minutes (uses macos_timeout)
 CORRECTION_MODE=false
 
 # ---------------------------------------------------------------------------
@@ -86,8 +86,13 @@ if ! [[ "$MAX_LOOPS" =~ ^[0-9]+$ ]] || [[ "$MAX_LOOPS" -eq 0 ]]; then
   exit 1
 fi
 
-if ! [[ "$WORKFLOW_TIMEOUT_MINS" =~ ^[0-9]+$ ]] || [[ "$WORKFLOW_TIMEOUT_MINS" -eq 0 ]]; then
-  echo "Error: --timeout-mins must be a positive integer (got: '$WORKFLOW_TIMEOUT_MINS')" >&2
+if ! [[ "$MAX_EPICS" =~ ^[0-9]+$ ]]; then
+  echo "Error: --max-epics must be a non-negative integer (got: '$MAX_EPICS')" >&2
+  exit 1
+fi
+
+if ! [[ "$WORKFLOW_TIMEOUT_MINS" =~ ^[0-9]+$ ]]; then
+  echo "Error: --timeout-mins must be a non-negative integer (got: '$WORKFLOW_TIMEOUT_MINS')" >&2
   exit 1
 fi
 
@@ -566,9 +571,14 @@ run_workflow() {
   fi
 
   # Run claude and stream output to both terminal and log
-  # timeout sends SIGTERM after WORKFLOW_TIMEOUT_MINS; exit code 124 = timed out
+  # To enable timeouts: pass --timeout-mins N (uses macos_timeout; exit code 124 = timed out)
   local exit_code=0
-  printf '%s\n' "$prompt" | claude -p --dangerously-skip-permissions --permission-mode bypassPermissions --model claude-opus-4-6 2>&1 | tee "$run_log" || exit_code=$?
+  if [ "$WORKFLOW_TIMEOUT_MINS" -gt 0 ]; then
+    local timeout_secs=$((WORKFLOW_TIMEOUT_MINS * 60))
+    printf '%s\n' "$prompt" | macos_timeout "$timeout_secs" claude -p --dangerously-skip-permissions --permission-mode bypassPermissions --model claude-opus-4-6 2>&1 | tee "$run_log" || exit_code=$?
+  else
+    printf '%s\n' "$prompt" | claude -p --dangerously-skip-permissions --permission-mode bypassPermissions --model claude-opus-4-6 2>&1 | tee "$run_log" || exit_code=$?
+  fi
 
   # claude -p exits 0 even on some errors; check for explicit failure
   if [ $exit_code -ne 0 ]; then
@@ -968,7 +978,7 @@ main() {
         if [ "$MAX_EPICS" -gt 0 ] && [ "$EPICS_COMPLETED" -ge "$MAX_EPICS" ]; then
           log HALT "Reached --max-epics cap ($MAX_EPICS). Pausing autopilot."
           echo "pause" > "$CONTROL_FILE"
-        elif ! $CORRECTION_MODE; then
+        elif [ "$epic_num_done" -ge 2 ] && ! $CORRECTION_MODE; then
           # Epic 2+ — pause and request human review (normal mode only)
           echo "Epic $epic_num_done complete — autopilot paused for your review. Reply to resume." \
             > "$SCRIPT_DIR/epic-review-pending"
