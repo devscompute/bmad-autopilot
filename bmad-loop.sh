@@ -29,15 +29,30 @@ BMM_CONFIG="$PROJECT_ROOT/_bmad/bmm/config.yaml"
 # ---------------------------------------------------------------------------
 DRY_RUN=false
 MAX_LOOPS=100
+MAX_EPICS=0   # 0 = unlimited; N = pause after N completed epics
+QUALITY_PASS=false  # --quality-pass: run quick-spec+quick-dev fix pass after each epic retro
 USE_COLOR=true
 WORKFLOW_TIMEOUT_MINS=90
 CORRECTION_MODE=false
+
+# ---------------------------------------------------------------------------
+# OpenClaw webhook — direct ping to Devs when an epic is done
+# Devs will then send Mr. T a Telegram message
+# ---------------------------------------------------------------------------
+OPENCLAW_HOOK_URL="http://127.0.0.1:18789/hooks/agent"
+OPENCLAW_HOOK_TOKEN="cc27836aca3d3fbbaabdd2c18b451b0c45ef031c741f8e29"
+
+# ---------------------------------------------------------------------------
+# Dropbox retrospective archive
+# ---------------------------------------------------------------------------
+DROPBOX_RETRO_DIR="$HOME/Library/CloudStorage/Dropbox/Shared/03 Projects/oneshot-v2/epic-retrospectives"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run)        DRY_RUN=true ;;
     --no-color)       USE_COLOR=false ;;
     --correction-mode) CORRECTION_MODE=true ;;
+    --quality-pass)    QUALITY_PASS=true ;;
     --max-loops)
       if [[ -n "${2:-}" ]]; then
         MAX_LOOPS="$2"; shift
@@ -46,6 +61,14 @@ while [[ $# -gt 0 ]]; do
       fi
       ;;
     --max-loops=*) MAX_LOOPS="${1#*=}" ;;
+    --max-epics)
+      if [[ -n "${2:-}" ]]; then
+        MAX_EPICS="$2"; shift
+      else
+        echo "Error: --max-epics requires a value" >&2; exit 1
+      fi
+      ;;
+    --max-epics=*) MAX_EPICS="${1#*=}" ;;
     --timeout-mins)
       if [[ -n "${2:-}" ]]; then
         WORKFLOW_TIMEOUT_MINS="$2"; shift
@@ -163,6 +186,7 @@ CONSECUTIVE_FAILURES=0
 MAX_FAILURES=3
 LAST_COMPLETED_EPIC=""
 LOOP_COUNT=0
+EPICS_COMPLETED=0
 INTERRUPTED=false
 CONTROL_ACTION=""
 WORKFLOW_TIMED_OUT=false
@@ -544,7 +568,7 @@ run_workflow() {
   # Run claude and stream output to both terminal and log
   # timeout sends SIGTERM after WORKFLOW_TIMEOUT_MINS; exit code 124 = timed out
   local exit_code=0
-  printf '%s\n' "$prompt" | macos_timeout $((WORKFLOW_TIMEOUT_MINS * 60)) claude -p --dangerously-skip-permissions --permission-mode bypassPermissions --model claude-opus-4-6 2>&1 | tee "$run_log" || exit_code=$?
+  printf '%s\n' "$prompt" | claude -p --dangerously-skip-permissions --permission-mode bypassPermissions --model claude-opus-4-6 2>&1 | tee "$run_log" || exit_code=$?
 
   # claude -p exits 0 even on some errors; check for explicit failure
   if [ $exit_code -ne 0 ]; then
@@ -617,6 +641,196 @@ ask_yes_no() {
       *)     echo "Please answer y or n." ;;
     esac
   done
+}
+
+
+# ---------------------------------------------------------------------------
+# Quality Pass — quick-spec + quick-dev fix pass after each epic retrospective
+# Enabled via --quality-pass flag
+# ---------------------------------------------------------------------------
+run_quality_pass() {
+  local epic_num="$1"
+  local retro_file="$2"
+  local BMM_CONFIG_PATH="$BMM_CONFIG"
+
+  log STEP "Quality Pass: launching quick-spec for Epic $epic_num..."
+  log INFO  "Retro source: $retro_file"
+
+  local qs_workflow="$PROJECT_ROOT/_bmad/bmm/workflows/bmad-quick-flow/quick-spec/workflow.md"
+  local qs_log="$LOG_DIR/quality-spec-$(date +%Y%m%d-%H%M%S)-epic-${epic_num}.log"
+
+  local qs_prompt
+  qs_prompt="$(cat << QSEOF
+# BMAD Autopilot — Quality Pass (quick-spec)
+
+You are an autonomous BMAD spec engineer operating in YOLO mode.
+Your task: analyze the Epic ${epic_num} retrospective and produce a tech-spec that fixes ALL issues, regressions, and improvement opportunities identified in it.
+
+## Context & File Locations
+
+- Project root: ${PROJECT_ROOT}
+- BMM config: ${BMM_CONFIG_PATH}
+- quick-spec workflow: ${qs_workflow}
+- Retrospective file: ${retro_file}
+
+## Your Goal
+
+Read the retrospective at \`${retro_file}\`. Identify every issue, missed acceptance criterion, quality problem, or improvement action item. Produce a comprehensive tech-spec to address them all in one pass.
+
+## YOLO Mode Rules (NO EXCEPTIONS)
+
+- Auto-select [C] (Continue) at every workflow menu — never pause for user input
+- Auto-select the most comprehensive, highest-quality option at every decision point
+- Do NOT ask questions — make expert decisions and document assumptions
+- Run the ENTIRE workflow start to finish without stopping
+- At the final menu, select [D] (Done) after the spec is finalized
+
+## Execution
+
+1. Load and fully read: \`${qs_workflow}\`
+2. Follow it exactly with YOLO mode rules above
+3. Your spec topic: "Epic ${epic_num} retrospective fix pass — address all issues from the retro"
+4. When complete, output the final line in EXACTLY this format (required for automation):
+   \`\`\`
+   QUALITY_DEV_CMD: quick-dev _bmad-output/implementation-artifacts/tech-spec-<slug>.md
+   \`\`\`
+
+Begin now. Load the workflow and execute.
+QSEOF
+)"
+
+  local exit_code=0
+  printf '%s\n' "$qs_prompt" | \
+    claude -p --dangerously-skip-permissions --permission-mode bypassPermissions \
+    --model claude-opus-4-6 2>&1 | tee "$qs_log" || exit_code=$?
+
+  if [ $exit_code -ne 0 ]; then
+    log ERROR "quick-spec failed (exit $exit_code) — skipping quality pass"
+    log ERROR "Log: $qs_log"
+    return 1
+  fi
+
+  # Parse the quick-dev file path from the output
+  local spec_file
+  spec_file=$(grep -oE 'QUALITY_DEV_CMD: quick-dev [_a-zA-Z0-9/. -]+\.md' "$qs_log" \
+    | tail -1 | sed 's/QUALITY_DEV_CMD: quick-dev //')
+
+  # Fallback: grep for any quick-dev reference in the log
+  if [ -z "$spec_file" ]; then
+    spec_file=$(grep -oE 'quick-dev [_a-zA-Z0-9/. -]+\.md' "$qs_log" \
+      | tail -1 | sed 's/quick-dev //')
+  fi
+
+  if [ -z "$spec_file" ]; then
+    log WARN "Could not extract quick-dev file from quick-spec output — skipping quick-dev"
+    log WARN "Review log for details: $qs_log"
+    return 1
+  fi
+
+  log OK "quick-spec done. Spec file: $spec_file"
+  log STEP "Quality Pass: launching quick-dev with $spec_file..."
+
+  local qd_workflow="$PROJECT_ROOT/_bmad/bmm/workflows/bmad-quick-flow/quick-dev/workflow.md"
+  local qd_log="$LOG_DIR/quality-dev-$(date +%Y%m%d-%H%M%S)-epic-${epic_num}.log"
+
+  local qd_prompt
+  qd_prompt="$(cat << QDEOF
+# BMAD Autopilot — Quality Pass (quick-dev)
+
+You are an autonomous BMAD developer operating in YOLO mode.
+Your task: implement the tech-spec at \`${spec_file}\` in full.
+
+## Context & File Locations
+
+- Project root: ${PROJECT_ROOT}
+- BMM config: ${BMM_CONFIG_PATH}
+- quick-dev workflow: ${qd_workflow}
+- Tech-spec to implement: ${PROJECT_ROOT}/${spec_file}
+
+## YOLO Mode Rules (NO EXCEPTIONS)
+
+- Auto-select [C] (Continue) at every workflow menu — never pause for user input
+- Implement ALL tasks in the spec completely
+- Do NOT run builds or test executables (headless environment — see CLAUDE.md)
+- Write tests from spec, do not execute them
+- Commit changes per the project git workflow in CLAUDE.md
+
+## Execution
+
+1. Load and fully read: \`${qd_workflow}\`
+2. Load and fully read the tech-spec: \`${PROJECT_ROOT}/${spec_file}\`
+3. Implement everything. Follow YOLO mode rules.
+4. When done, output a structured completion report.
+
+Begin now.
+QDEOF
+)"
+
+  exit_code=0
+  printf '%s\n' "$qd_prompt" | \
+    claude -p --dangerously-skip-permissions --permission-mode bypassPermissions \
+    --model claude-opus-4-6 2>&1 | tee "$qd_log" || exit_code=$?
+
+  if [ $exit_code -ne 0 ]; then
+    log ERROR "quick-dev failed (exit $exit_code)"
+    log ERROR "Log: $qd_log"
+  else
+    log OK "Quality pass complete! Spec implemented."
+    log INFO "Log: $qd_log"
+  fi
+
+  log INFO "Cooling down 20 minutes before resuming the main loop..."
+  sleep 1200
+  log OK "Cooldown done. Resuming."
+}
+
+
+# ---------------------------------------------------------------------------
+# Notify Devs (OpenClaw) that an epic is done → Devs sends Telegram to Mr. T
+# Also copies retrospective file to Dropbox
+# ---------------------------------------------------------------------------
+notify_epic_done() {
+  local epic_num="$1"
+  local retro_key="epic-${epic_num}-retrospective"
+  local today
+  today="$(date +%Y-%m-%d)"
+
+  # --- Copy retro to Dropbox ---
+  local retro_src
+  retro_src="$(find "$PROJECT_ROOT/_bmad-output/implementation-artifacts" -maxdepth 1 -name "epic-${epic_num}-retro*.md" 2>/dev/null | sort | tail -1)"
+
+  if [ -n "$retro_src" ]; then
+    mkdir -p "$DROPBOX_RETRO_DIR"
+    local retro_dest="$DROPBOX_RETRO_DIR/$(basename "$retro_src")"
+    cp "$retro_src" "$retro_dest"
+    log OK "Retro copied to Dropbox: $retro_dest"
+  else
+    log WARN "No retro file found for epic $epic_num — skipping Dropbox copy"
+    retro_src="(not found)"
+  fi
+
+  # --- Ping OpenClaw gateway (Devs) to send Telegram to Mr. T ---
+  local retro_basename
+  retro_basename="$(basename "${retro_src:-}")"
+  local hook_msg
+  hook_msg="Epic ${epic_num} of the oneshot-v2 project is complete and the retrospective is done. Send Mr. T a Telegram message letting him know. Mention the retro file: ${retro_basename}. The autopilot is now paused and waiting for him to say go."
+
+  if command -v curl &>/dev/null && [ -n "$OPENCLAW_HOOK_TOKEN" ]; then
+    local response
+    response=$(curl -s -w "\n%{http_code}" -X POST "$OPENCLAW_HOOK_URL" \
+      -H "Authorization: Bearer $OPENCLAW_HOOK_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "{\"message\": \"$hook_msg\", \"name\": \"bmad-autopilot\", \"deliver\": true, \"channel\": \"telegram\"}" 2>/dev/null)
+    local http_code
+    http_code=$(echo "$response" | tail -1)
+    if [[ "$http_code" == "202" ]]; then
+      log OK "Devs notified via OpenClaw webhook → Telegram message to Mr. T incoming"
+    else
+      log WARN "Webhook ping failed (HTTP $http_code) — Devs not notified"
+    fi
+  else
+    log WARN "curl not available or no hook token — skipping Devs notification"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -741,7 +955,20 @@ main() {
         log EPIC "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         log EPIC "Epic $epic_num_done fully wrapped up."
         log EPIC "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        if [ "$epic_num_done" -ge 2 ] && ! $CORRECTION_MODE; then
+        EPICS_COMPLETED=$((EPICS_COMPLETED + 1))
+        # Notify Devs → Telegram to Mr. T + copy retro to Dropbox
+        notify_epic_done "$epic_num_done"
+        # Quality pass (--quality-pass flag)
+        if $QUALITY_PASS; then
+          local retro_src_qp
+          retro_src_qp="$(find "$PROJECT_ROOT/_bmad-output/implementation-artifacts" -maxdepth 1 -name "epic-${epic_num_done}-retro*.md" 2>/dev/null | sort | tail -1)"
+          [ -n "$retro_src_qp" ] && run_quality_pass "$epic_num_done" "$retro_src_qp"
+        fi
+        # Check --max-epics cap
+        if [ "$MAX_EPICS" -gt 0 ] && [ "$EPICS_COMPLETED" -ge "$MAX_EPICS" ]; then
+          log HALT "Reached --max-epics cap ($MAX_EPICS). Pausing autopilot."
+          echo "pause" > "$CONTROL_FILE"
+        elif ! $CORRECTION_MODE; then
           # Epic 2+ — pause and request human review (normal mode only)
           echo "Epic $epic_num_done complete — autopilot paused for your review. Reply to resume." \
             > "$SCRIPT_DIR/epic-review-pending"
@@ -785,8 +1012,19 @@ main() {
           update_story_status "$retro_key" "done" || \
           { log WARN "Retrospective failed — continuing anyway"; retro_ok=false; }
 
+        # Notify Devs + copy retro to Dropbox
+        notify_epic_done "$LAST_COMPLETED_EPIC"
+        EPICS_COMPLETED=$((EPICS_COMPLETED + 1))
+        # Quality pass (--quality-pass flag)
+        if $QUALITY_PASS; then
+          local retro_src_qp2
+          retro_src_qp2="$(find "$PROJECT_ROOT/_bmad-output/implementation-artifacts" -maxdepth 1 -name "epic-${LAST_COMPLETED_EPIC}-retro*.md" 2>/dev/null | sort | tail -1)"
+          [ -n "$retro_src_qp2" ] && run_quality_pass "$LAST_COMPLETED_EPIC" "$retro_src_qp2"
+        fi
         # Pause after every completed epic (Epic 2+) — skipped in correction mode
-        if [ "$LAST_COMPLETED_EPIC" -ge 2 ] && ! $CORRECTION_MODE; then
+        # Also pause if --max-epics cap reached
+        if { [ "$MAX_EPICS" -gt 0 ] && [ "$EPICS_COMPLETED" -ge "$MAX_EPICS" ]; } || \
+           { [ "$LAST_COMPLETED_EPIC" -ge 2 ] && ! $CORRECTION_MODE; }; then
           echo "Epic $LAST_COMPLETED_EPIC complete — autopilot paused for your review. Reply to resume." \
             > "$SCRIPT_DIR/epic-review-pending"
           echo "pause" > "$CONTROL_FILE"
