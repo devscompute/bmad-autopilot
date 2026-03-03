@@ -3,7 +3,7 @@
 # BMAD Autopilot — bmad-loop.sh
 # Autonomous implementation loop for Claude Code CLI
 # =============================================================================
-# Usage: ./bmad-loop.sh [--dry-run] [--max-loops N] [--no-color]
+# Usage: ./bmad-loop.sh [--dry-run] [--max-loops N] [--no-color] [--no-quality-pass]
 # =============================================================================
 
 set -euo pipefail
@@ -30,7 +30,7 @@ BMM_CONFIG="$PROJECT_ROOT/_bmad/bmm/config.yaml"
 DRY_RUN=false
 MAX_LOOPS=100
 MAX_EPICS=0   # 0 = unlimited; N = pause after N completed epics
-QUALITY_PASS=false  # --quality-pass: run quick-spec+quick-dev fix pass after each epic retro
+QUALITY_PASS=true   # on by default; disable with --no-quality-pass
 USE_COLOR=true
 WORKFLOW_TIMEOUT_MINS=0  # 0 = no timeout; N = kill workflow after N minutes (uses macos_timeout)
 CORRECTION_MODE=false
@@ -53,6 +53,7 @@ while [[ $# -gt 0 ]]; do
     --no-color)       USE_COLOR=false ;;
     --correction-mode) CORRECTION_MODE=true ;;
     --quality-pass)    QUALITY_PASS=true ;;
+    --no-quality-pass) QUALITY_PASS=false ;;
     --max-loops)
       if [[ -n "${2:-}" ]]; then
         MAX_LOOPS="$2"; shift
@@ -656,7 +657,7 @@ ask_yes_no() {
 
 # ---------------------------------------------------------------------------
 # Quality Pass — quick-spec + quick-dev fix pass after each epic retrospective
-# Enabled via --quality-pass flag
+# On by default; disable with --no-quality-pass
 # ---------------------------------------------------------------------------
 run_quality_pass() {
   local epic_num="$1"
@@ -685,7 +686,14 @@ Your task: analyze the Epic ${epic_num} retrospective and produce a tech-spec th
 
 ## Your Goal
 
-Read the retrospective at \`${retro_file}\`. Identify every issue, missed acceptance criterion, quality problem, or improvement action item. Produce a comprehensive tech-spec to address them all in one pass.
+Read the retrospective at \`${retro_file}\`. Produce a comprehensive tech-spec that addresses everything found in it.
+
+**Priority order (highest first):**
+
+1. **Critical Blockers** — These MUST be resolved before the next epic can begin. Look for sections titled "Critical Blockers" or similar. If present, these are your top priority and must ALL be included in the spec.
+2. **Regressions and broken functionality** — Anything that was working but is now broken.
+3. **Missed acceptance criteria** — Stories marked done that do not fully meet their criteria.
+4. **Quality problems and improvement action items** — Code quality, test gaps, etc.
 
 ## YOLO Mode Rules (NO EXCEPTIONS)
 
