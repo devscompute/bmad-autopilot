@@ -1039,7 +1039,7 @@ main() {
         # Pause after every completed epic (Epic 2+) — skipped in correction mode
         # Also pause if --max-epics cap reached
         if { [ "$MAX_EPICS" -gt 0 ] && [ "$EPICS_COMPLETED" -ge "$MAX_EPICS" ]; } || \
-           { [ "$LAST_COMPLETED_EPIC" -ge 2 ] && ! $CORRECTION_MODE; }; then
+           { [ "$MAX_EPICS" -eq 0 ] && [ "$LAST_COMPLETED_EPIC" -ge 2 ] && ! $CORRECTION_MODE; }; then
           echo "Epic $LAST_COMPLETED_EPIC complete — autopilot paused for your review. Reply to resume." \
             > "$SCRIPT_DIR/epic-review-pending"
           echo "pause" > "$CONTROL_FILE"
